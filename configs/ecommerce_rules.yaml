@@ -1,0 +1,232 @@
+version: "1.0"
+name: "ecommerce_stress_benchmark"
+description: "E-Commerce schema rules with referential integrity and temporal cascades"
+
+global_settings:
+  seed: 42
+  default_start_time: "2023-01-01T00:00:00"
+  default_end_time: "2025-01-01T00:00:00"
+
+tables:
+  categories:
+    target_rows: 50
+    primary_key: "id"
+    columns:
+      id:
+        type: "autoincrement"
+      name:
+        type: "categorical"
+        values: ["Electronics", "Computers", "Books", "Home & Kitchen", "Clothing", "Sports", "Toys", "Automotive", "Garden", "Health"]
+      description:
+        type: "text"
+
+  products:
+    target_rows: 1000
+    primary_key: "id"
+    foreign_keys:
+      category_id:
+        references: "categories.id"
+        distribution: "uniform"
+    columns:
+      id:
+        type: "autoincrement"
+      title:
+        type: "product_name"
+      sku:
+        type: "unique_code"
+        prefix: "SKU-"
+      base_price:
+        type: "numeric"
+        min: 5.0
+        max: 2500.0
+        distribution: "lognormal"
+      created_at:
+        type: "datetime"
+        range: ["2022-01-01T00:00:00", "2023-01-01T00:00:00"]
+        distribution: "uniform"
+
+  customers:
+    target_rows: 10000
+    primary_key: "id"
+    columns:
+      id:
+        type: "autoincrement"
+      email:
+        type: "email"
+      full_name:
+        type: "person_name"
+      country:
+        type: "categorical"
+        values: ["RU", "KZ", "BY", "AM", "UZ"]
+        weights: [0.65, 0.15, 0.10, 0.05, 0.05]
+      status:
+        type: "categorical"
+        values: ["active", "suspended", "deleted"]
+        weights: [0.85, 0.10, 0.05]
+      created_at:
+        type: "datetime"
+        range: ["2023-01-01T00:00:00", "2024-06-01T00:00:00"]
+        distribution: "poisson_timeline" # Пуассоновский поток регистраций пользователей
+
+  orders:
+    target_rows: 50000
+    primary_key: "id"
+    foreign_keys:
+      customer_id:
+        references: "customers.id"
+        # Закон Ципфа: малая часть постоянных клиентов делает большинство заказов
+        distribution: "zipf"
+        alpha: 1.5
+    columns:
+      id:
+        type: "autoincrement"
+      status:
+        type: "categorical"
+        values: ["pending", "paid", "shipped", "delivered", "cancelled"]
+        weights: [0.05, 0.10, 0.15, 0.65, 0.05]
+      total_amount:
+        type: "calculated_aggregate" # сумма позиций заказа
+      created_at:
+        type: "datetime"
+        # Межтабличная временная зависимость: Заказ не может быть оформлен раньше регистрации пользователя!
+        temporal_dependency:
+          parent_field: "customers.created_at"
+          relation: "greater_or_equal"
+          offset:
+            distribution: "exponential"
+            min_seconds: 3600      # минимум 1 час после регистрации
+            max_seconds: 31536000  # максимум 1 год
+            scale_seconds: 604800  # медиана около 1 недели
+
+  order_items:
+    target_rows: 150000
+    primary_key: "id"
+    foreign_keys:
+      order_id:
+        references: "orders.id"
+        distribution: "cardinality_range"
+        min_per_parent: 1
+        max_per_parent: 6
+      product_id:
+        references: "products.id"
+        # Закон Парето: 20% популярных товаров присутствуют в 80% покупок
+        distribution: "zipf"
+        alpha: 1.2
+    columns:
+      id:
+        type: "autoincrement"
+      quantity:
+        type: "integer"
+        min: 1
+        max: 5
+        weights: [0.70, 0.20, 0.06, 0.03, 0.01]
+      unit_price:
+        type: "inherit"
+        from_field: "products.base_price"
+
+  payments:
+    target_rows: 47500 # ~95% заказов имеют платеж
+    primary_key: "id"
+    foreign_keys:
+      order_id:
+        references: "orders.id"
+        distribution: "unique_parent" # 1:1 отношение
+    columns:
+      id:
+        type: "autoincrement"
+      payment_method:
+        type: "categorical"
+        values: ["credit_card", "mir_pay", "sbp", "cash_on_delivery"]
+        weights: [0.40, 0.30, 0.25, 0.05]
+      amount:
+        type: "inherit"
+        from_field: "orders.total_amount"
+      status:
+        type: "categorical"
+        values: ["success", "failed", "refunded"]
+        weights: [0.92, 0.05, 0.03]
+      payment_date:
+        type: "datetime"
+        # Оплата происходит строго после создания заказа
+        temporal_dependency:
+          parent_field: "orders.created_at"
+          relation: "greater_or_equal"
+          offset:
+            distribution: "exponential"
+            min_seconds: 60       # минимум 1 минута после заказа
+            max_seconds: 172800   # до 48 часов
+            scale_seconds: 1800   # обычно оплачивают в течение 30 минут
+
+  shipments:
+    target_rows: 40000 # Только для оплаченных заказов
+    primary_key: "id"
+    foreign_keys:
+      order_id:
+        references: "orders.id"
+        distribution: "unique_parent"
+    columns:
+      id:
+        type: "autoincrement"
+      tracking_number:
+        type: "unique_code"
+        prefix: "TRK-"
+      status:
+        type: "categorical"
+        values: ["in_transit", "delivered", "returned"]
+        weights: [0.15, 0.80, 0.05]
+      shipped_at:
+        type: "datetime"
+        # Отгрузка происходит после подтверждения оплаты
+        temporal_dependency:
+          parent_field: "payments.payment_date"
+          relation: "greater_or_equal"
+          offset:
+            distribution: "normal"
+            min_seconds: 7200     # минимум 2 часа
+            max_seconds: 432000   # до 5 дней
+            mean_seconds: 86400   # в среднем через сутки
+            std_seconds: 28800
+      delivered_at:
+        type: "datetime"
+        # Внутристрочная временная зависимость: вручение строго после отправки!
+        temporal_dependency:
+          parent_field: "shipments.shipped_at"
+          relation: "greater_or_equal"
+          offset:
+            distribution: "normal"
+            min_seconds: 86400    # минимум 1 день доставки
+            max_seconds: 1209600  # до 14 дней
+            mean_seconds: 259200  # в среднем 3 дня
+            std_seconds: 86400
+
+  reviews:
+    target_rows: 15000
+    primary_key: "id"
+    foreign_keys:
+      order_id:
+        references: "orders.id"
+      product_id:
+        references: "order_items.product_id"
+      customer_id:
+        references: "orders.customer_id"
+    columns:
+      id:
+        type: "autoincrement"
+      rating:
+        type: "integer"
+        min: 1
+        max: 5
+        weights: [0.05, 0.05, 0.10, 0.30, 0.50]
+      comment:
+        type: "text"
+      created_at:
+        type: "datetime"
+        # Отзыв можно оставить только после получения посылки клиентом!
+        temporal_dependency:
+          parent_field: "shipments.delivered_at"
+          relation: "greater_or_equal"
+          offset:
+            distribution: "exponential"
+            min_seconds: 3600     # через час после получения
+            max_seconds: 5184000  # в течение 60 дней
+            scale_seconds: 432000 # обычно в первые 5 дней

@@ -1,0 +1,28 @@
+# Virtual environments
+.venv/
+env/
+venv/
+ENV/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Data outputs & dumps
+output/
+*.csv
+*.parquet
+*.sql.dump
+
+# IDE
+.idea/
+.vscode/
+*.swp
